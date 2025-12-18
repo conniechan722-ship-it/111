@@ -561,7 +561,7 @@ class AIAnalyzer:
     
     def __init__(self, ollama:  OllamaClient, pe: PEAnalyzer, requirements: str = ""):
         self.ollama = ollama
-        self. pe = pe
+        self.pe = pe
         self.requirements = requirements
     
     def analyze_function(self, func:  Function) -> Dict:
@@ -579,8 +579,10 @@ class AIAnalyzer:
         if self.requirements:
             req_lower = self.requirements.lower()
             code_lower = code.lower()
-            # 简单匹配：检查需求中提到的关键词是否出现在代码中
-            relevant = any(keyword in code_lower for keyword in req_lower.split() if len(keyword) > 3)
+            # 提取关键词：去除常见词汇，保留API名称和技术关键词
+            keywords = [w for w in req_lower.split() if len(w) > 3 and w not in {'关注', '相关', '调用', '功能', '代码', '文件', '示例'}]
+            # 检查关键词是否出现在代码中
+            relevant = any(keyword in code_lower for keyword in keywords)
             if not relevant and not result['security']:
                 # 如果不相关且不是安全相关，可以跳过详细分析
                 return result
