@@ -1,0 +1,15 @@
+# 调试需求文件示例
+目标: 绕过软件的授权验证
+重点关注:
+- 注册码验证函数
+- 试用期检查
+- 网络验证相关调用
+
+关键API:
+- GetSystemTime
+- RegQueryValueEx
+- InternetOpen
+
+忽略:
+- UI相关代码
+- 日志功能

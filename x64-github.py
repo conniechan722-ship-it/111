@@ -68,6 +68,8 @@ class Config:
     max_functions: int = 500
     auto_patch: bool = False
     output_dir: str = "output"
+    requirements_file: str = ""
+    requirements_content: str = ""
     
     @classmethod
     def load(cls, path: str = "config.ini") -> 'Config':
@@ -89,6 +91,26 @@ class Config:
         p['x64dbg'] = {'port': str(self.x64dbg_bridge_port)}
         with open(path, 'w') as f:
             p.write(f)
+
+
+def load_requirements_file(file_path: str) -> str:
+    """
+    加载需求文件并返回其内容
+    
+    Args:
+        file_path: 需求文件路径（.txt格式）
+        
+    Returns:
+        需求文件的内容字符串
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        print(f"[需求] 已加载: {file_path}")
+        return content
+    except Exception as e:
+        print(f"[错误] 无法加载需求文件: {e}")
+        return ""
 
 
 class OllamaClient:
@@ -145,15 +167,19 @@ class OllamaClient:
             print(f"[Ollama] 错误: {e}")
         return None
     
-    def analyze_code(self, code: str, question: str, role: str = "逆向工程专家") -> Optional[str]:
+    def analyze_code(self, code: str, question: str, role: str = "逆向工程专家", requirements: str = "") -> Optional[str]:
         if len(code) > 3000:
             code = code[:3000] + "\n..."
         system = f"你是{role}，精通x86/x64汇编和逆向工程。用中文简洁回答。"
+        if requirements:
+            system += f"\n\n当前调试需求：\n{requirements}\n\n请围绕这些需求进行针对性分析。"
         prompt = f"代码:\n```\n{code}\n```\n\n问题:  {question}\n\n分析:"
         return self.generate(prompt, system=system)
     
-    def suggest_patch(self, instr: str, ctx: str, goal: str) -> Optional[Dict]: 
+    def suggest_patch(self, instr: str, ctx: str, goal: str, requirements: str = "") -> Optional[Dict]: 
         system = "你是补丁专家。返回JSON:  {\"方法\": \"\", \"补丁字节\": \"hex\", \"风险\": \"LOW/MEDIUM/HIGH\", \"说明\": \"\"}"
+        if requirements:
+            system += f"\n\n当前调试需求：\n{requirements}\n\n请围绕这些需求提供补丁建议。"
         prompt = f"指令:  {instr}\n上下文: {ctx}\n目标:  {goal}\n\n补丁建议:"
         result = self.generate(prompt, system=system)
         if result:
@@ -533,9 +559,10 @@ if __name__ == '__main__':
 class AIAnalyzer: 
     SECURITY_APIS = {'isdebuggerpresent', 'checkremotedebuggerpresent', 'ntqueryinformationprocess', 'gettickcount', 'queryperformancecounter', 'outputdebugstring', 'virtualprotect', 'virtualallocex', 'writeprocessmemory', 'createremotethread'}
     
-    def __init__(self, ollama:  OllamaClient, pe: PEAnalyzer):
+    def __init__(self, ollama:  OllamaClient, pe: PEAnalyzer, requirements: str = ""):
         self.ollama = ollama
-        self. pe = pe
+        self.pe = pe
+        self.requirements = requirements
     
     def analyze_function(self, func:  Function) -> Dict:
         result = {'address': hex(func.address), 'name': func.name, 'purpose': '', 'security':  False, 'risk':  'LOW', 'suggestion': ''}
@@ -548,8 +575,23 @@ class AIAnalyzer:
                 result['risk'] = 'HIGH'
                 break
         
+        # 如果有需求，检查函数是否与需求相关
+        if self.requirements:
+            req_lower = self.requirements.lower()
+            code_lower = code.lower()
+            # 提取关键词：去除常见词汇，保留API名称和技术关键词
+            keywords = [w for w in req_lower.split() if len(w) > 3 and w not in {'关注', '相关', '调用', '功能', '代码', '文件', '示例'}]
+            # 检查关键词是否出现在代码中
+            relevant = any(keyword in code_lower for keyword in keywords)
+            if not relevant and not result['security']:
+                # 如果不相关且不是安全相关，可以跳过详细分析
+                return result
+        
         if self.ollama.is_available():
-            resp = self.ollama.analyze_code(code, "分析这个函数的功能，判断是否是安全检查或保护机制，给出修改建议")
+            question = "分析这个函数的功能，判断是否是安全检查或保护机制，给出修改建议"
+            if self.requirements:
+                question = f"基于以下需求分析这个函数：\n{self.requirements}\n\n判断该函数是否与需求相关，如果相关请给出详细分析和修改建议。"
+            resp = self.ollama.analyze_code(code, question, requirements=self.requirements)
             if resp:
                 result['ai_analysis'] = resp
                 func.ai_analysis = resp
@@ -561,7 +603,10 @@ class AIAnalyzer:
         
         if self.ollama.is_available():
             ctx = self._get_context(pp. address, 5)
-            resp = self.ollama.suggest_patch(pp. instruction, ctx, "绕过这个检查")
+            goal = "绕过这个检查"
+            if self.requirements:
+                goal = f"基于需求绕过这个检查：\n{self.requirements}"
+            resp = self.ollama.suggest_patch(pp. instruction, ctx, goal, requirements=self.requirements)
             if resp:
                 result['ai_suggestion'] = resp
                 pp.ai_suggestion = str(resp)
@@ -587,7 +632,14 @@ class AIAnalyzer:
         
         print("\n[AI分析] 分析函数...")
         sec_funcs = []
-        for addr, func in list(self.pe. functions.items())[:50]: 
+        
+        # 如果有需求，优先分析与需求相关的函数
+        funcs_to_analyze = list(self.pe.functions.items())[:50]
+        if self.requirements:
+            print(f"[AI分析] 使用需求文件进行针对性分析")
+            # 可以在这里添加更智能的过滤逻辑，现在简单地分析前50个
+            
+        for addr, func in funcs_to_analyze: 
             analysis = self.analyze_function(func)
             if analysis. get('security'):
                 sec_funcs.append(func)
@@ -615,6 +667,8 @@ class AIAnalyzer:
         
         if self.ollama. is_available():
             summary_ctx = f"文件: {self. pe.path}\n函数数:  {len(self. pe.functions)}\n安全函数: {len(sec_funcs)}\n补丁点:  {len(patches)}"
+            if self.requirements:
+                summary_ctx += f"\n\n调试需求:\n{self.requirements}"
             resp = self.ollama. generate(f"根据以下分析结果生成简要总结和修改建议:\n{summary_ctx}", system="你是逆向工程专家，用中文简洁回答")
             if resp:
                 result.summary = resp
@@ -775,6 +829,7 @@ class InteractiveShell:
         self.bridge: Optional[X64DbgBridge] = None
         self.result: Optional[AnalysisResult] = None
         self. running = True
+        self.requirements = config.requirements_content
     
     def run(self):
         self._banner()
@@ -810,7 +865,8 @@ class InteractiveShell:
             'apply': self._apply, 'revert':  self._revert, 'save': self._save,
             'models': self._models, 'model': self._model,
             'connect': self._connect, 'disconnect': self._disconnect,
-            'ai':  self._ai, 'export': self._export
+            'ai':  self._ai, 'export': self._export,
+            'requirements': self._requirements, 'loadreq': self._loadreq
         }
         
         if c in commands:
@@ -838,6 +894,10 @@ AI命令:
   models            列出可用模型
   model <name>      切换模型
   ai <question>     询问AI
+  
+需求命令:
+  requirements      查看当前调试需求
+  loadreq <file>    加载需求文件
   
 x64dbg命令:
   connect           连接x64dbg
@@ -871,7 +931,7 @@ x64dbg命令:
         if not self.pe:
             print("请先加载文件")
             return
-        self.analyzer = AIAnalyzer(self. ollama, self. pe)
+        self.analyzer = AIAnalyzer(self. ollama, self. pe, requirements=self.requirements)
         self.result = self.analyzer. full_analysis()
         
         print(f"\n{'='*50}")
@@ -1032,9 +1092,29 @@ x64dbg命令:
         ctx = ""
         if self. pe and self.pe.instructions:
             ctx = '\n'.join(str(i) for i in self.pe.instructions[: 20])
-        resp = self.ollama.analyze_code(ctx, q)
+        resp = self.ollama.analyze_code(ctx, q, requirements=self.requirements)
         if resp:
             print(f"\n{resp}")
+    
+    def _requirements(self, args):
+        """查看当前调试需求"""
+        if self.requirements:
+            print(f"\n当前调试需求:\n{self.requirements}")
+        else:
+            print("\n未加载调试需求")
+    
+    def _loadreq(self, args):
+        """动态加载需求文件"""
+        if not args:
+            print("用法: loadreq <file>")
+            return
+        path = ' '.join(args)
+        content = load_requirements_file(path)
+        if content:
+            self.requirements = content
+            self.config.requirements_file = path
+            self.config.requirements_content = content
+            print("需求已加载，重新分析以应用新需求")
 def print_banner():
     deps = []
     for name, ok in DEPENDENCIES.items():
@@ -1048,12 +1128,22 @@ def print_banner():
     
     依赖:  {' | '.join(deps)}
 {'='*60}
+
+用法:
+  python x64-github.py analyze <file> [--txt requirements.txt]
+  python x64-github.py interactive [--txt requirements.txt]
+  python x64-github.py patch <in> <out> [--txt requirements.txt]
+  
+选项:
+  --txt <file>      指定调试需求文件（.txt格式）
+  --model <name>    指定AI模型
+  --url <url>       指定Ollama地址
 """)
 
 
 def cmd_analyze(args:  List[str], config: Config):
     if len(args) < 1:
-        print("用法:  analyze <file>")
+        print("用法:  analyze <file> [--txt requirements.txt]")
         return
     
     path = args[0]
@@ -1070,7 +1160,7 @@ def cmd_analyze(args:  List[str], config: Config):
     pe.disassemble_code(config.max_instructions)
     pe.identify_functions()
     
-    analyzer = AIAnalyzer(ollama, pe)
+    analyzer = AIAnalyzer(ollama, pe, requirements=config.requirements_content)
     result = analyzer.full_analysis()
     
     os.makedirs(config.output_dir, exist_ok=True)
@@ -1140,15 +1230,12 @@ def main():
     config = Config. load()
     
     if len(sys. argv) < 2:
-        print("用法:")
-        print(f"  {sys.argv[0]} interactive       交互模式")
-        print(f"  {sys.argv[0]} analyze <file>    分析文件")
-        print(f"  {sys. argv[0]} patch <in> <out>  自动补丁")
-        print(f"\n选项:")
-        print(f"  --model <name>    指定模型")
-        print(f"  --url <url>       Ollama地址")
+        print("输入 'interactive' 进入交互模式，或查看上述用法")
         return
     
+    # Parse all arguments to find command and options
+    cmd = None
+    cmd_args = []
     i = 1
     while i < len(sys.argv):
         arg = sys.argv[i]
@@ -1158,18 +1245,33 @@ def main():
         elif arg == '--url' and i+1 < len(sys. argv):
             config.ollama_url = sys.argv[i+1]
             i += 2
+        elif arg == '--txt' and i+1 < len(sys.argv):
+            txt_file = sys.argv[i+1]
+            if os.path.exists(txt_file):
+                config.requirements_file = txt_file
+                config.requirements_content = load_requirements_file(txt_file)
+            else:
+                print(f"[错误] 需求文件不存在: {txt_file}")
+                return
+            i += 2
+        elif not cmd and arg in ['interactive', '-i', 'analyze', 'patch']:
+            cmd = arg
+            i += 1
         else:
-            break
+            # This is a command argument
+            cmd_args.append(arg)
+            i += 1
     
-    cmd = sys.argv[i] if i < len(sys.argv) else ''
-    args = sys.argv[i+1:]
+    if not cmd:
+        print("未指定命令")
+        return
     
     if cmd == 'interactive' or cmd == '-i':
         cmd_interactive(config)
     elif cmd == 'analyze': 
-        cmd_analyze(args, config)
+        cmd_analyze(cmd_args, config)
     elif cmd == 'patch':
-        cmd_patch(args, config)
+        cmd_patch(cmd_args, config)
     else:
         print(f"未知命令: {cmd}")
 
