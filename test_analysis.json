@@ -1,0 +1,41 @@
+{
+  "file": "test_client.exe",
+  "hash": "1f29fca0abcdef1234567890",
+  "timestamp": "2025-12-19T19:44:17.297785",
+  "stats": {
+    "instructions": 50000,
+    "functions": 320,
+    "patches": 3
+  },
+  "risk": "LOW",
+  "summary": "测试分析结果",
+  "patches": [
+    {
+      "address": "0x40109e",
+      "size": 2,
+      "original": "7e05",
+      "patched": "9090",
+      "type": "conditional_jump",
+      "risk": "MEDIUM",
+      "status": "PENDING"
+    },
+    {
+      "address": "0x401100",
+      "size": 5,
+      "original": "e800000000",
+      "patched": "9090909090",
+      "type": "security_call",
+      "risk": "HIGH",
+      "status": "PENDING"
+    },
+    {
+      "address": "0x401180",
+      "size": 2,
+      "original": "7502",
+      "patched": "9090",
+      "type": "conditional_jump",
+      "risk": "LOW",
+      "status": "PENDING"
+    }
+  ]
+}
