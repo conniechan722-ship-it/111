@@ -42,6 +42,82 @@ from abc import ABC, abstractmethod
 import hashlib
 
 # ============================================================================
+# 需求文件加载
+# ============================================================================
+
+def load_requirements(txt_path: str) -> Dict[str, Any]:
+    """
+    加载调试需求文件
+    
+    支持的格式:
+    目标: xxx
+    重点关注:
+    - item1
+    - item2
+    关键API:
+    - api1
+    忽略:
+    - ignore1
+    """
+    requirements = {
+        'goal': '',           # 调试目标
+        'focus': [],          # 重点关注项
+        'key_apis': [],       # 关键API
+        'ignore': [],         # 忽略项
+        'raw_content': ''     # 原始内容
+    }
+    
+    if not txt_path:
+        return requirements
+    
+    if not os.path.exists(txt_path):
+        print(f"[警告] 需求文件不存在: {txt_path}")
+        return requirements
+    
+    try:
+        with open(txt_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            requirements['raw_content'] = content
+            
+            # 解析各个字段
+            current_section = None
+            for line in content.split('\n'):
+                line = line.strip()
+                
+                # 跳过空行和注释
+                if not line or line.startswith('#'):
+                    continue
+                
+                # 识别节标题
+                if line.startswith('目标:'):
+                    requirements['goal'] = line.split(':', 1)[1].strip()
+                    current_section = None
+                elif line.startswith('重点关注:'):
+                    current_section = 'focus'
+                elif line.startswith('关键API:'):
+                    current_section = 'key_apis'
+                elif line.startswith('忽略:'):
+                    current_section = 'ignore'
+                # 处理列表项
+                elif line.startswith('-') and current_section:
+                    item = line[1:].strip()
+                    if item:
+                        requirements[current_section].append(item)
+        
+        # 打印加载的需求
+        if requirements['goal']:
+            print(f"[需求] 目标: {requirements['goal']}")
+            if requirements['focus']:
+                print(f"[需求] 重点关注: {', '.join(requirements['focus'][:3])}...")
+            if requirements['key_apis']:
+                print(f"[需求] 关键API: {', '.join(requirements['key_apis'][:3])}...")
+                
+    except Exception as e:
+        print(f"[错误] 读取需求文件失败: {e}")
+    
+    return requirements
+
+# ============================================================================
 # 可选依赖检查
 # ============================================================================
 
@@ -238,7 +314,8 @@ class OllamaClient:
             return None
     
     def analyze_code(self, code_context: str, question: str, 
-                     analyst_role: str = "reverse engineer") -> Optional[str]:
+                     analyst_role: str = "reverse engineer",
+                     requirements: Dict[str, Any] = None) -> Optional[str]:
         """
         分析代码的便捷方法
         
@@ -246,20 +323,34 @@ class OllamaClient:
             code_context: 代码上下文（反汇编、函数信息等）
             question: 分析问题
             analyst_role: 分析师角色
+            requirements: 需求上下文
             
         Returns:
             分析结果
         """
         system_prompt = f"""你是一位专业的{analyst_role}，精通x86/x64汇编语言和逆向工程。
-你的任务是分析提供的反汇编代码，并给出专业、准确的分析。
+你的任务是分析提供的反汇编代码，并给出专业、准确的分析。"""
+        
+        # 添加需求上下文
+        if requirements and requirements.get('goal'):
+            system_prompt += f"\n\n当前调试目标: {requirements['goal']}"
+            if requirements.get('focus'):
+                system_prompt += f"\n重点关注: {', '.join(requirements['focus'])}"
+            if requirements.get('key_apis'):
+                system_prompt += f"\n关键API: {', '.join(requirements['key_apis'])}"
+            if requirements.get('ignore'):
+                system_prompt += f"\n忽略项: {', '.join(requirements['ignore'])}"
+            system_prompt += "\n\n请围绕上述目标进行针对性分析，不要偏离主题。"
+        else:
+            system_prompt += """
 
 分析时请注意：
 1. 识别代码的功能和目的
 2. 找出关键的逻辑点和可修改位置
 3. 评估潜在的安全风险
-4. 提供具体可行的建议
-
-请用中文回答，保持专业简洁。"""
+4. 提供具体可行的建议"""
+        
+        system_prompt += "\n\n请用中文回答，保持专业简洁。"
         
         prompt = f"""## 代码上下文
 
@@ -1475,10 +1566,11 @@ def apply_patch(file_path, file_offset):
 class AICodeAnalyst(ABC):
     """AI代码分析师基类"""
     
-    def __init__(self, name: str, role: str, ollama:  OllamaClient = None):
+    def __init__(self, name: str, role: str, ollama:  OllamaClient = None, requirements: Dict[str, Any] = None):
         self.name = name
         self.role = role
         self. ollama = ollama
+        self.requirements = requirements or {}
         self.findings:  List[Dict] = []
         self. system_prompt = ""
     
@@ -1505,7 +1597,7 @@ class AICodeAnalyst(ABC):
             return None
         
         try:
-            return self.ollama. analyze_code(context, question, self.role)
+            return self.ollama. analyze_code(context, question, self.role, self.requirements)
         except Exception as e:
             print(f"[{self.name}] LLM分析失败: {e}")
             return None
@@ -1524,8 +1616,8 @@ class AICodeAnalyst(ABC):
 class LogicAnalyst(AICodeAnalyst):
     """逻辑分析师 - 理解代码逻辑流程"""
     
-    def __init__(self, ollama: OllamaClient = None):
-        super().__init__("逻辑分析师", "代码逻辑和控制流专家", ollama)
+    def __init__(self, ollama: OllamaClient = None, requirements: Dict[str, Any] = None):
+        super().__init__("逻辑分析师", "代码逻辑和控制流专家", ollama, requirements)
         self.system_prompt = """你是一位专业的代码逻辑分析师，擅长分析程序的控制流和数据流。
 你的任务是：
 1. 理解代码的执行流程
@@ -1680,8 +1772,8 @@ class LogicAnalyst(AICodeAnalyst):
 class SecurityAnalyst(AICodeAnalyst):
     """安全分析师 - 识别安全问题和可利用点"""
     
-    def __init__(self, ollama: OllamaClient = None):
-        super().__init__("安全分析师", "安全漏洞和逆向工程专家", ollama)
+    def __init__(self, ollama: OllamaClient = None, requirements: Dict[str, Any] = None):
+        super().__init__("安全分析师", "安全漏洞和逆向工程专家", ollama, requirements)
         self.system_prompt = """你是一位专业的安全分析师，精通软件安全和逆向工程。
 你的任务是：
 1. 识别代码中的安全检查和保护机制
@@ -1912,8 +2004,8 @@ class SecurityAnalyst(AICodeAnalyst):
 class PatchExpert(AICodeAnalyst):
     """补丁专家 - 提供修改建议"""
     
-    def __init__(self, ollama:  OllamaClient = None):
-        super().__init__("补丁专家", "二进制补丁和代码修改专家", ollama)
+    def __init__(self, ollama:  OllamaClient = None, requirements: Dict[str, Any] = None):
+        super().__init__("补丁专家", "二进制补丁和代码修改专家", ollama, requirements)
         self.system_prompt = """你是一位专业的二进制补丁专家，精通PE文件修改和代码补丁。
 你的任务是：
 1. 分析可修改的代码点
@@ -2083,8 +2175,8 @@ class PatchExpert(AICodeAnalyst):
 class ReverseEngineer(AICodeAnalyst):
     """逆向工程师 - 深度代码理解"""
     
-    def __init__(self, ollama: OllamaClient = None):
-        super().__init__("逆向工程师", "深度逆向分析和算法识别专家", ollama)
+    def __init__(self, ollama: OllamaClient = None, requirements: Dict[str, Any] = None):
+        super().__init__("逆向工程师", "深度逆向分析和算法识别专家", ollama, requirements)
         self.system_prompt = """你是一位资深的逆向工程师，精通汇编语言和底层代码分析。
 你的任务是：
 1. 深度理解代码结构和算法
@@ -2313,8 +2405,8 @@ class ReverseEngineer(AICodeAnalyst):
 class BehaviorAnalyst(AICodeAnalyst):
     """行为分析师 - 分析程序运行时行为"""
     
-    def __init__(self, ollama: OllamaClient = None):
-        super().__init__("行为分析师", "程序行为预测和恶意代码分析专家", ollama)
+    def __init__(self, ollama: OllamaClient = None, requirements: Dict[str, Any] = None):
+        super().__init__("行为分析师", "程序行为预测和恶意代码分析专家", ollama, requirements)
         self.system_prompt = """你是一位专业的程序行为分析师，擅长预测程序的运行时行为。
 你的任务是：
 1. 分析程序的API调用模式
@@ -2502,7 +2594,7 @@ class BehaviorAnalyst(AICodeAnalyst):
 class AITeamManager:
     """AI团队管理器"""
     
-    def __init__(self, ollama_url: str = None, model:  str = None, use_llm: bool = True):
+    def __init__(self, ollama_url: str = None, model:  str = None, use_llm: bool = True, requirements: Dict[str, Any] = None):
         """
         初始化AI团队管理器
         
@@ -2510,9 +2602,11 @@ class AITeamManager:
             ollama_url: Ollama服务地址
             model:  模型名称
             use_llm: 是否使用LLM
+            requirements: 需求上下文
         """
         self.use_llm = use_llm
         self.ollama = None
+        self.requirements = requirements or {}
         
         if use_llm: 
             self.ollama = OllamaClient(ollama_url, model)
@@ -2522,11 +2616,11 @@ class AITeamManager:
         
         # 创建分析师团队
         self. analysts = {
-            'logic': LogicAnalyst(self. ollama),
-            'security': SecurityAnalyst(self.ollama),
-            'patch': PatchExpert(self.ollama),
-            'reverse': ReverseEngineer(self. ollama),
-            'behavior': BehaviorAnalyst(self.ollama)
+            'logic': LogicAnalyst(self. ollama, requirements),
+            'security': SecurityAnalyst(self.ollama, requirements),
+            'patch': PatchExpert(self.ollama, requirements),
+            'reverse': ReverseEngineer(self. ollama, requirements),
+            'behavior': BehaviorAnalyst(self.ollama, requirements)
         }
         self.analysis_results = {}
     
@@ -2920,7 +3014,7 @@ class AIDisassemblyAnalyzer:
     """AI反汇编分析器 - 整合所有分析组件的主类"""
     
     def __init__(self, file_path:  str, ollama_url: str = None, 
-                 model:  str = None, use_llm: bool = True):
+                 model:  str = None, use_llm: bool = True, requirements_file: str = None):
         """
         初始化分析器
         
@@ -2929,6 +3023,7 @@ class AIDisassemblyAnalyzer:
             ollama_url: Ollama服务地址
             model: 模型名称
             use_llm: 是否使用LLM
+            requirements_file: 需求文件路径
         """
         self.file_path = file_path
         self.file_data = None  # 修复：添加file_data属性
@@ -2943,6 +3038,10 @@ class AIDisassemblyAnalyzer:
         self. ollama_url = ollama_url
         self.model = model
         self. use_llm = use_llm
+        
+        # 加载需求
+        self.requirements_file = requirements_file
+        self.requirements = load_requirements(requirements_file) if requirements_file else {}
         
         # 分析引擎
         self.disasm_engine = DisassemblyEngine()
@@ -3133,7 +3232,8 @@ class AIDisassemblyAnalyzer:
             self.ai_team = AITeamManager(
                 ollama_url=self.ollama_url,
                 model=self.model,
-                use_llm=self.use_llm
+                use_llm=self.use_llm,
+                requirements=self.requirements
             )
         
         # 准备分析数据
@@ -3277,7 +3377,7 @@ class AIDisassemblyAnalyzer:
 class InteractiveAnalyzer:
     """交互式反汇编分析器"""
     
-    def __init__(self, ollama_url: str = None, model:  str = None, use_llm:  bool = True):
+    def __init__(self, ollama_url: str = None, model:  str = None, use_llm:  bool = True, requirements_file: str = None):
         self.analyzer = None
         self.current_address = 0
         self.bookmarks = {}
@@ -3288,6 +3388,10 @@ class InteractiveAnalyzer:
         self.ollama_url = ollama_url
         self.model = model
         self.use_llm = use_llm
+        
+        # 需求配置
+        self.requirements_file = requirements_file
+        self.requirements = load_requirements(requirements_file) if requirements_file else {}
     
     def run(self):
         """运行交互式模式"""
@@ -3356,6 +3460,10 @@ class InteractiveAnalyzer:
                     self._show_info()
                 elif command == 'llm':
                     self._llm_query(args)
+                elif command == 'requirements':
+                    self._show_requirements()
+                elif command == 'loadreq':
+                    self._load_requirements(args)
                 else:
                     print(f"未知命令: {command}.  输入 'help' 查看帮助.")
                     
@@ -3394,6 +3502,10 @@ class InteractiveAnalyzer:
   ai                  运行AI团队分析
   llm <问题>           直接询问LLM
   
+=== 需求管理 ===
+  requirements        查看当前需求
+  loadreq <文件>       动态加载需求文件
+  
 === 注释和书签 ===
   comment <地址> <内容>  添加注释
   bookmark [add/del/list] <地址> <名称>  管理书签
@@ -3420,7 +3532,8 @@ class InteractiveAnalyzer:
             file_path,
             ollama_url=self.ollama_url,
             model=self. model,
-            use_llm=self.use_llm
+            use_llm=self.use_llm,
+            requirements_file=self.requirements_file
         )
         
         if self.analyzer.load():
@@ -3802,13 +3915,76 @@ class InteractiveAnalyzer:
             context += '\n'.join(nearby[: 20])
         
         print("正在查询LLM...")
-        response = ollama. analyze_code(context, question, "逆向工程专家")
+        response = ollama. analyze_code(context, question, "逆向工程专家", self.requirements)
         
         if response: 
             print(f"\n🤖 LLM回答:\n")
             print(response)
         else:
             print("LLM查询失败")
+    
+    def _show_requirements(self):
+        """显示当前需求"""
+        if not self.requirements or not self.requirements.get('goal'):
+            print("未加载需求文件")
+            print("使用 'loadreq <文件>' 加载需求")
+            return
+        
+        print("\n" + "="*60)
+        print("📋 当前调试需求")
+        print("="*60)
+        
+        if self.requirements.get('goal'):
+            print(f"\n目标: {self.requirements['goal']}")
+        
+        if self.requirements.get('focus'):
+            print(f"\n重点关注:")
+            for item in self.requirements['focus']:
+                print(f"  - {item}")
+        
+        if self.requirements.get('key_apis'):
+            print(f"\n关键API:")
+            for api in self.requirements['key_apis']:
+                print(f"  - {api}")
+        
+        if self.requirements.get('ignore'):
+            print(f"\n忽略项:")
+            for item in self.requirements['ignore']:
+                print(f"  - {item}")
+        
+        print()
+    
+    def _load_requirements(self, args: List[str]):
+        """动态加载需求文件"""
+        if not args:
+            print("用法: loadreq <文件路径>")
+            return
+        
+        file_path = ' '.join(args)
+        
+        if not os.path.exists(file_path):
+            print(f"文件不存在: {file_path}")
+            return
+        
+        # 加载新需求
+        self.requirements_file = file_path
+        self.requirements = load_requirements(file_path)
+        
+        # 如果分析器已经存在，更新其需求
+        if self.analyzer:
+            self.analyzer.requirements_file = file_path
+            self.analyzer.requirements = self.requirements
+            
+            # 如果AI团队已经初始化，更新它
+            if self.analyzer.ai_team:
+                self.analyzer.ai_team.requirements = self.requirements
+                # 更新所有分析师的需求
+                for analyst in self.analyzer.ai_team.analysts.values():
+                    analyst.requirements = self.requirements
+        
+        print(f"需求文件已加载: {file_path}")
+        if self.requirements.get('goal'):
+            print(f"目标: {self.requirements['goal']}")
     
     def _add_comment(self, args: List[str]):
         """添加注释"""
@@ -4399,6 +4575,16 @@ Ollama LLM选项:
 其他选项: 
     --output <目录>     指定输出目录 (默认:  output)
     --format <格式>     补丁格式 (python/ips/x64dbg/ida)
+    --txt <文件>        指定调试需求文件（.txt格式）
+
+需求文件格式示例:
+    目标: 绕过授权验证
+    重点关注:
+    - 注册码验证
+    - 试用期检查
+    关键API:
+    - GetSystemTime
+    - RegQueryValueEx
 
 示例:
     # 基础分析（无LLM）
@@ -4412,6 +4598,9 @@ Ollama LLM选项:
     
     # 交互式模式
     python {sys.argv[0]} interactive --model llama3
+    
+    # 使用需求文件分析
+    python {sys.argv[0]} analyze target.exe --txt requirements.txt --model llama3
     
     # 生成补丁脚本
     python {sys.argv[0]} patch target. exe --format python
@@ -4432,6 +4621,7 @@ def parse_args(args:  List[str]) -> Dict[str, Any]:
         'ollama_url':  'http://localhost:11434',
         'model': 'llama3',
         'use_llm': True,
+        'requirements_file': None,
     }
     
     i = 0
@@ -4454,6 +4644,9 @@ def parse_args(args:  List[str]) -> Dict[str, Any]:
             i += 1
         elif arg == '--model' and i + 1 < len(args):
             parsed['model'] = args[i + 1]
+            i += 1
+        elif arg == '--txt' and i + 1 < len(args):
+            parsed['requirements_file'] = args[i + 1]
             i += 1
         elif arg == '--no-llm': 
             parsed['use_llm'] = False
@@ -4485,7 +4678,8 @@ def cmd_analyze(args:  Dict[str, Any]):
         file_path,
         ollama_url=args['ollama_url'],
         model=args['model'],
-        use_llm=args['use_llm']
+        use_llm=args['use_llm'],
+        requirements_file=args.get('requirements_file')
     )
     
     # 执行完整分析
@@ -4514,7 +4708,7 @@ def cmd_analyze(args:  Dict[str, Any]):
             print(summary[: 300] + "..." if len(summary) > 300 else summary)
         
         print(f"\n报告已保存:  {report_path}")
-    else: 
+    else:
         print("分析失败")
 
 
@@ -4523,7 +4717,8 @@ def cmd_interactive(args: Dict[str, Any]):
     interactive = InteractiveAnalyzer(
         ollama_url=args['ollama_url'],
         model=args['model'],
-        use_llm=args['use_llm']
+        use_llm=args['use_llm'],
+        requirements_file=args.get('requirements_file')
     )
     interactive.run()
 
@@ -4546,7 +4741,8 @@ def cmd_patch(args: Dict[str, Any]):
         file_path,
         ollama_url=args['ollama_url'],
         model=args['model'],
-        use_llm=False  # 补丁生成不需要LLM
+        use_llm=False,  # 补丁生成不需要LLM
+        requirements_file=args.get('requirements_file')
     )
     
     if not analyzer.load():
