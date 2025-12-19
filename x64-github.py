@@ -116,29 +116,68 @@ def load_requirements_file(file_path: str) -> str:
 class OllamaClient:
     def __init__(self, config: Config):
         self.config = config
-        self.base_url = config. ollama_url. rstrip('/')
+        self.base_url = config.ollama_url.rstrip('/')
         self.model = config.default_model
-        self. timeout = config.timeout
+        self.requested_model = config.default_model  # 保存用户请求的模型
+        self.timeout = config.timeout
         self.available = False
-        self. models:  List[str] = []
+        self.models: List[str] = []
         self._init()
     
     def _init(self):
-        if not DEPENDENCIES. get('requests'):
+        if not DEPENDENCIES.get('requests'):
             return
-        try: 
+        try:
             r = requests.get(f"{self.base_url}/api/tags", timeout=5)
             if r.status_code == 200:
                 self.models = [m['name'] for m in r.json().get('models', [])]
                 if self.models:
-                    if self.model not in self.models:
-                        base = self.model.split(':')[0]
-                        matched = next((m for m in self.models if base in m), None)
-                        self.model = matched or self.models[0]
+                    # 尝试匹配用户指定的模型
+                    matched_model = self._find_best_model_match(self.model)
+                    if matched_model:
+                        if matched_model != self.model:
+                            print(f"[Ollama] 模型 '{self.model}' 匹配到: {matched_model}")
+                        self.model = matched_model
+                    else:
+                        print(f"[Ollama] 警告: 未找到模型 '{self.model}'，使用默认: {self.models[0]}")
+                        self.model = self.models[0]
                     self.available = True
-                    print(f"[Ollama] 模型:  {self.model}")
-        except: 
-            print(f"[Ollama] 连接失败:  {self.base_url}")
+                    print(f"[Ollama] 当前模型: {self.model}")
+        except Exception as e:
+            print(f"[Ollama] 连接失败: {self.base_url} - {e}")
+    
+    def _find_best_model_match(self, requested: str) -> Optional[str]:
+        """查找最佳匹配的模型"""
+        # 1. 精确匹配
+        if requested in self.models:
+            return requested
+        
+        # 2. 不区分大小写的精确匹配
+        requested_lower = requested.lower()
+        for m in self.models:
+            if m.lower() == requested_lower:
+                return m
+        
+        # 3. 前缀匹配 (比如 qwen2.5:32b 匹配 qwen2.5:32b-instruct)
+        for m in self.models:
+            if m.lower().startswith(requested_lower):
+                return m
+        
+        # 4. 基础名称匹配 (比如 qwen2.5 匹配 qwen2.5:32b)
+        base = requested.split(':')[0].lower()
+        # 优先匹配带有相同标签的
+        if ':' in requested:
+            tag = requested.split(':')[1].lower()
+            for m in self.models:
+                if base in m.lower() and tag in m.lower():
+                    return m
+        
+        # 5. 只匹配基础名称
+        for m in self.models:
+            if base in m.lower():
+                return m
+        
+        return None
     
     def list_models(self) -> List[str]: 
         return self.models
@@ -556,6 +595,243 @@ if __name__ == '__main__':
                     lines. append(f'wb {p.address+i:X},{b:02X}')
                 lines.append('')
         return '\n'.join(lines)
+
+
+class AICodeAnalyst(ABC):
+    """AI代码分析师基类"""
+    
+    def __init__(self, name: str, role: str, ollama: OllamaClient, requirements: str = ""):
+        self.name = name
+        self.role = role
+        self.ollama = ollama
+        self.requirements = requirements
+        self.findings: List[Dict] = []
+    
+    @abstractmethod
+    def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        pass
+    
+    def _get_requirements_context(self) -> str:
+        """获取需求上下文"""
+        if not self.requirements:
+            return ""
+        return f"\n调试需求: {self.requirements}\n请围绕这些需求进行针对性分析。"
+
+
+class LogicAnalyst(AICodeAnalyst):
+    """逻辑分析师"""
+    def __init__(self, ollama: OllamaClient, requirements: str = ""):
+        super().__init__("逻辑分析师", "理解代码逻辑流程", ollama, requirements)
+    
+    def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"[{self.name}] 分析中...")
+        result = {'analyst': self.name, 'findings': [], 'summary': ''}
+        
+        if not self.ollama.is_available():
+            result['summary'] = "LLM不可用"
+            return result
+        
+        # 分析主要函数逻辑
+        functions = data.get('functions', {})
+        if functions:
+            func_list = list(functions.values())[:5]
+            func_summary = "\n".join([f"- {f.name} @ 0x{f.address:X}: {len(f.instructions)}条指令" 
+                                     for f in func_list])
+            
+            prompt = f"分析以下函数的逻辑流程：\n{func_summary}{self._get_requirements_context()}"
+            resp = self.ollama.generate(prompt, system="你是逻辑分析师，专注于理解代码执行流程。用中文简洁回答。")
+            if resp:
+                result['summary'] = resp[:200]
+                result['findings'].append({'type': 'logic', 'content': resp})
+        
+        return result
+
+
+class SecurityAnalyst(AICodeAnalyst):
+    """安全分析师"""
+    def __init__(self, ollama: OllamaClient, requirements: str = ""):
+        super().__init__("安全分析师", "识别安全问题和保护机制", ollama, requirements)
+    
+    def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"[{self.name}] 分析中...")
+        result = {'analyst': self.name, 'findings': [], 'summary': ''}
+        
+        if not self.ollama.is_available():
+            result['summary'] = "LLM不可用"
+            return result
+        
+        # 分析安全相关API调用
+        imports = data.get('imports', [])
+        security_apis = [imp for imp in imports if any(api in imp.get('func', '').lower() 
+                        for api in ['debug', 'protect', 'check', 'verify', 'crypt'])]
+        
+        if security_apis:
+            api_list = "\n".join([f"- {imp['dll']}.{imp['func']}" for imp in security_apis[:10]])
+            prompt = f"分析这些安全相关的API调用：\n{api_list}{self._get_requirements_context()}"
+            resp = self.ollama.generate(prompt, system="你是安全分析师，专注于识别安全机制和漏洞。用中文简洁回答。")
+            if resp:
+                result['summary'] = resp[:200]
+                result['findings'].append({'type': 'security', 'severity': 'HIGH', 'content': resp})
+        
+        return result
+
+
+class PatchExpert(AICodeAnalyst):
+    """补丁专家"""
+    def __init__(self, ollama: OllamaClient, requirements: str = ""):
+        super().__init__("补丁专家", "提供修改建议", ollama, requirements)
+    
+    def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"[{self.name}] 分析中...")
+        result = {'analyst': self.name, 'findings': [], 'summary': ''}
+        
+        if not self.ollama.is_available():
+            result['summary'] = "LLM不可用"
+            return result
+        
+        # 分析补丁点
+        patches = data.get('patches', [])
+        if patches:
+            patch_summary = "\n".join([f"- 0x{p.address:X}: {p.patch_type} ({p.risk_level})" 
+                                      for p in patches[:5]])
+            
+            prompt = f"提供以下补丁点的修改建议：\n{patch_summary}{self._get_requirements_context()}"
+            resp = self.ollama.generate(prompt, system="你是补丁专家，专注于提供安全有效的代码修改方案。用中文简洁回答。")
+            if resp:
+                result['summary'] = resp[:200]
+                result['findings'].append({'type': 'patch', 'content': resp})
+        
+        return result
+
+
+class ReverseEngineer(AICodeAnalyst):
+    """逆向工程师"""
+    def __init__(self, ollama: OllamaClient, requirements: str = ""):
+        super().__init__("逆向工程师", "深度代码理解", ollama, requirements)
+    
+    def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"[{self.name}] 分析中...")
+        result = {'analyst': self.name, 'findings': [], 'summary': ''}
+        
+        if not self.ollama.is_available():
+            result['summary'] = "LLM不可用"
+            return result
+        
+        # 深度分析指令模式
+        instructions = data.get('instructions', [])
+        if instructions:
+            instr_sample = "\n".join([f"0x{i.address:X}: {i.mnemonic} {i.op_str}" 
+                                     for i in instructions[:20]])
+            
+            prompt = f"深度分析以下汇编代码：\n{instr_sample}{self._get_requirements_context()}"
+            resp = self.ollama.generate(prompt, system="你是资深逆向工程师，精通汇编语言和程序分析。用中文简洁回答。")
+            if resp:
+                result['summary'] = resp[:200]
+                result['findings'].append({'type': 'reverse', 'content': resp})
+        
+        return result
+
+
+class BehaviorAnalyst(AICodeAnalyst):
+    """行为分析师"""
+    def __init__(self, ollama: OllamaClient, requirements: str = ""):
+        super().__init__("行为分析师", "分析程序运行时行为", ollama, requirements)
+    
+    def analyze(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        print(f"[{self.name}] 分析中...")
+        result = {'analyst': self.name, 'findings': [], 'summary': ''}
+        
+        if not self.ollama.is_available():
+            result['summary'] = "LLM不可用"
+            return result
+        
+        # 分析程序行为特征
+        imports = data.get('imports', [])
+        behavior_keywords = ['file', 'registry', 'network', 'process', 'thread']
+        behavior_apis = [imp for imp in imports if any(kw in imp.get('func', '').lower() 
+                        for kw in behavior_keywords)]
+        
+        if behavior_apis:
+            api_list = "\n".join([f"- {imp['dll']}.{imp['func']}" for imp in behavior_apis[:10]])
+            prompt = f"分析程序的运行时行为特征：\n{api_list}{self._get_requirements_context()}"
+            resp = self.ollama.generate(prompt, system="你是行为分析师，专注于理解程序的运行时行为和意图。用中文简洁回答。")
+            if resp:
+                result['summary'] = resp[:200]
+                result['findings'].append({'type': 'behavior', 'content': resp})
+        
+        return result
+
+
+class AITeamManager:
+    """AI团队管理器"""
+    
+    def __init__(self, ollama: OllamaClient, requirements: str = ""):
+        self.ollama = ollama
+        self.requirements = requirements
+        self.analysts = {
+            'logic': LogicAnalyst(ollama, requirements),
+            'security': SecurityAnalyst(ollama, requirements),
+            'patch': PatchExpert(ollama, requirements),
+            'reverse': ReverseEngineer(ollama, requirements),
+            'behavior': BehaviorAnalyst(ollama, requirements),
+        }
+    
+    def run_full_analysis(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """运行完整的团队分析"""
+        print("\n[AI团队] 开始协同分析...")
+        
+        results = {}
+        for name, analyst in self.analysts.items():
+            try:
+                results[name] = analyst.analyze(data)
+            except Exception as e:
+                print(f"[AI团队] {analyst.name} 分析出错: {e}")
+                results[name] = {'analyst': analyst.name, 'error': str(e), 'findings': []}
+        
+        # 整合分析结果
+        consensus = self._build_consensus(results)
+        
+        print("[AI团队] 协同分析完成")
+        return {
+            'team_results': results,
+            'consensus': consensus,
+            'requirements': self.requirements
+        }
+    
+    def _build_consensus(self, results: Dict) -> Dict:
+        """整合各分析师的结论"""
+        all_findings = []
+        for analyst_name, result in results.items():
+            if 'findings' in result:
+                all_findings.extend(result['findings'])
+        
+        # 收集所有摘要
+        summaries = []
+        for analyst_name, result in results.items():
+            if result.get('summary'):
+                summaries.append(f"[{result.get('analyst', analyst_name)}] {result['summary']}")
+        
+        # 生成共识报告
+        high_priority = [f for f in all_findings if f.get('severity') == 'HIGH']
+        
+        return {
+            'total_findings': len(all_findings),
+            'high_priority': high_priority,
+            'analyst_summaries': summaries,
+            'recommendations': self._generate_recommendations(results)
+        }
+    
+    def _generate_recommendations(self, results: Dict) -> List[str]:
+        """生成建议"""
+        recommendations = []
+        
+        # 从各分析师的发现中提取建议
+        for analyst_name, result in results.items():
+            if result.get('findings'):
+                recommendations.append(f"参考{result.get('analyst', analyst_name)}的分析结果")
+        
+        return recommendations[:5]
+
 class AIAnalyzer: 
     SECURITY_APIS = {'isdebuggerpresent', 'checkremotedebuggerpresent', 'ntqueryinformationprocess', 'gettickcount', 'queryperformancecounter', 'outputdebugstring', 'virtualprotect', 'virtualallocex', 'writeprocessmemory', 'createremotethread'}
     
@@ -563,6 +839,8 @@ class AIAnalyzer:
         self.ollama = ollama
         self.pe = pe
         self.requirements = requirements
+        # Only create team manager if ollama is available
+        self.team_manager = AITeamManager(ollama, requirements) if ollama.is_available() else None
     
     def analyze_function(self, func:  Function) -> Dict:
         result = {'address': hex(func.address), 'name': func.name, 'purpose': '', 'security':  False, 'risk':  'LOW', 'suggestion': ''}
@@ -664,6 +942,24 @@ class AIAnalyzer:
             result.risk_level = 'LOW'
         
         result.functions = self.pe.functions
+        
+        # 使用 AI 团队进行协同分析
+        if self.ollama.is_available() and self.team_manager:
+            print("\n[AI分析] 启动AI团队协同分析...")
+            team_data = {
+                'instructions': self.pe.instructions,
+                'functions': self.pe.functions,
+                'imports': self.pe.imports,
+                'patches': patches,
+                'requirements': self.requirements
+            }
+            team_results = self.team_manager.run_full_analysis(team_data)
+            
+            # 将团队分析结果添加到AnalysisResult
+            # 由于AnalysisResult没有team_analysis字段，我们将其添加到recommendations中
+            consensus = team_results.get('consensus', {})
+            if consensus.get('analyst_summaries'):
+                result.recommendations.extend(consensus['analyst_summaries'][:3])
         
         if self.ollama. is_available():
             summary_ctx = f"文件: {self. pe.path}\n函数数:  {len(self. pe.functions)}\n安全函数: {len(sec_funcs)}\n补丁点:  {len(patches)}"
@@ -943,7 +1239,8 @@ x64dbg命令:
     def _info(self, args):
         if not self.pe:
             print("请先加载文件")
-            return        print(f"文件: {self.pe.path}")
+            return
+        print(f"文件: {self.pe.path}")
         print(f"大小: {len(self.pe. data):,}")
         print(f"架构: {'x64' if self.pe.is_64 else 'x86'}")
         print(f"指令:  {len(self.pe. instructions)}")
