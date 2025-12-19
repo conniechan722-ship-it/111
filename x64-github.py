@@ -839,7 +839,8 @@ class AIAnalyzer:
         self.ollama = ollama
         self.pe = pe
         self.requirements = requirements
-        self.team_manager = AITeamManager(ollama, requirements)
+        # Only create team manager if ollama is available
+        self.team_manager = AITeamManager(ollama, requirements) if ollama.is_available() else None
     
     def analyze_function(self, func:  Function) -> Dict:
         result = {'address': hex(func.address), 'name': func.name, 'purpose': '', 'security':  False, 'risk':  'LOW', 'suggestion': ''}
@@ -943,7 +944,7 @@ class AIAnalyzer:
         result.functions = self.pe.functions
         
         # 使用 AI 团队进行协同分析
-        if self.ollama.is_available():
+        if self.ollama.is_available() and self.team_manager:
             print("\n[AI分析] 启动AI团队协同分析...")
             team_data = {
                 'instructions': self.pe.instructions,
