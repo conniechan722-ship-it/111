@@ -18,6 +18,12 @@ ENV/
 # Output
 output/
 *.bak
+*.backup
 
 # Config
 config.ini
+
+# Test files
+test_*.exe
+test_*.json
+patched.exe
