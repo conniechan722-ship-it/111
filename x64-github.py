@@ -1239,7 +1239,8 @@ x64dbg命令:
     def _info(self, args):
         if not self.pe:
             print("请先加载文件")
-            return        print(f"文件: {self.pe.path}")
+            return
+        print(f"文件: {self.pe.path}")
         print(f"大小: {len(self.pe. data):,}")
         print(f"架构: {'x64' if self.pe.is_64 else 'x86'}")
         print(f"指令:  {len(self.pe. instructions)}")
