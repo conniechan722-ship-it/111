@@ -56,27 +56,30 @@ class PatchEntry:
     @classmethod
     def from_dict(cls, data: Dict) -> 'PatchEntry':
         """从字典创建补丁条目"""
-        # 解析地址
+        # 解析地址 - 支持字符串和整数
         addr = data.get('address', data.get('addr', '0x0'))
         if isinstance(addr, str):
             addr = int(addr, 16) if addr.startswith('0x') else int(addr)
         
-        # 解析原始字节
+        # 解析原始字节 - 支持多种格式
         orig = data.get('original', data.get('original_bytes', data.get('orig', '')))
         if isinstance(orig, str):
-            orig = bytes.fromhex(orig.replace(' ', '')) if orig else b''
+            # 移除可能的空格和0x前缀
+            orig = orig.replace(' ', '').replace('0x', '')
+            orig = bytes.fromhex(orig) if orig else b''
         elif isinstance(orig, list):
             orig = bytes(orig)
         
         # 解析补丁字节
         patched = data.get('patched', data.get('patched_bytes', data.get('patch', '')))
         if isinstance(patched, str) and patched:
-            patched = bytes.fromhex(patched.replace(' ', ''))
+            patched = patched.replace(' ', '').replace('0x', '')
+            patched = bytes.fromhex(patched)
         elif isinstance(patched, list):
             patched = bytes(patched)
         elif not patched:
             # 默认用 NOP 填充
-            size = data.get('size', len(orig))
+            size = data.get('size', len(orig) if orig else 0)
             patched = b'\x90' * size
         
         return cls(
@@ -86,7 +89,8 @@ class PatchEntry:
             patched_bytes=patched if patched else b'',
             patch_type=data.get('type', data.get('patch_type', 'unknown')),
             description=data.get('description', data.get('desc', '')),
-            risk_level=data.get('risk_level', data.get('risk', 'MEDIUM')).upper()
+            # 支持 risk 和 risk_level 两种字段名
+            risk_level=data.get('risk', data.get('risk_level', 'MEDIUM')).upper()
         )
 
 
@@ -96,15 +100,17 @@ class JSONParser:
     @staticmethod
     def detect_format(data: Dict) -> str:
         """检测 JSON 格式来源"""
+        # x64-github.py 格式：有 stats 和 patches
+        if 'stats' in data and 'patches' in data:
+            return 'x64-github'
+        # x64-github.py 备用格式：有 stats 和 patch_points
         if 'stats' in data and 'patch_points' in data:
             return 'x64-github'
-        elif 'analysis' in data and 'patch_points' in data.get('analysis', {}):
+        # mix-github.py 格式
+        if 'analysis' in data or 'ai_team_analysis' in data:
             return 'mix-github'
-        elif 'ai_team_analysis' in data:
-            return 'mix-github'
-        elif 'patch_points' in data:
-            return 'generic'
-        elif 'patches' in data or 'patch_entries' in data:
+        # 通用格式
+        if 'patches' in data or 'patch_points' in data or 'patch_entries' in data:
             return 'generic'
         return 'unknown'
     
@@ -132,16 +138,21 @@ class JSONParser:
             'hash': data.get('hash', data.get('file_hash', '')),
             'timestamp': data.get('timestamp', ''),
             'stats': data.get('stats', {}),
-            'risk_level': data.get('risk_level', 'UNKNOWN'),
+            'risk_level': data.get('risk', data.get('risk_level', 'UNKNOWN')),
             'summary': data.get('summary', '')
         }
         
         patches = []
-        for pp in data.get('patch_points', []):
+        # 支持 patches 和 patch_points 两种字段名
+        patch_list = data.get('patches', data.get('patch_points', []))
+        print(f"[*] 找到 {len(patch_list)} 个补丁点")
+        for pp in patch_list:
             try:
                 patches.append(PatchEntry.from_dict(pp))
             except Exception as e:
                 print(f"[警告] 解析补丁失败: {e}")
+                import traceback
+                traceback.print_exc()
         
         return meta, patches
     
@@ -298,11 +309,21 @@ class AutoPatcher:
             return False
         
         try:
+            print(f"[*] 正在解析 JSON 文件: {json_path}")
             self.meta, self.patches = JSONParser.parse(json_path)
             print(f"[*] 加载了 {len(self.patches)} 个补丁点")
+            if self.meta:
+                print(f"[*] 元数据:")
+                print(f"    文件: {self.meta.get('file', 'N/A')}")
+                print(f"    风险级别: {self.meta.get('risk_level', 'N/A')}")
+                if 'stats' in self.meta:
+                    stats = self.meta['stats']
+                    print(f"    统计: 指令={stats.get('instructions', 0)}, 函数={stats.get('functions', 0)}, 补丁={stats.get('patches', 0)}")
             return len(self.patches) > 0
         except Exception as e:
             print(f"[错误] 解析 JSON 失败: {e}")
+            import traceback
+            traceback.print_exc()
             return False
     
     def load_pe(self, pe_path: str) -> bool:
@@ -343,6 +364,9 @@ class AutoPatcher:
             print("[错误] 请先加载 PE 文件")
             return 0, 0
         
+        print(f"[*] 开始应用 {len(patches)} 个补丁...")
+        print(f"[*] 验证模式: {'开启' if verify else '关闭'}")
+        
         success = 0
         failed = 0
         
@@ -358,6 +382,7 @@ class AutoPatcher:
         
         self.applied_count = success
         self.failed_count = failed
+        print(f"\n[*] 应用完成: 成功 {success}/{len(patches)}, 失败 {failed}/{len(patches)}")
         return success, failed
     
     def save(self, output_path: str) -> bool:
@@ -556,8 +581,15 @@ def main():
     
     # 设置默认输出路径
     if not output_path:
-        base, ext = os.path.splitext(pe_path)
-        output_path = f"{base}.patched{ext}"
+        # 如果是 .exe 文件，默认输出为 patched.exe
+        if pe_path.lower().endswith('.exe'):
+            dir_name = os.path.dirname(pe_path)
+            output_path = os.path.join(dir_name, 'patched.exe') if dir_name else 'patched.exe'
+        else:
+            # 其他文件类型使用原名称加 .patched 后缀
+            base, ext = os.path.splitext(pe_path)
+            output_path = f"{base}.patched{ext}"
+        print(f"[*] 输出文件: {output_path}")
     
     # 创建 AutoPatcher
     patcher = AutoPatcher()
